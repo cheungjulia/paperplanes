@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Graffiti</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <p class="eyebrow">Graffiti</p>
+          <h1>Current Spot</h1>
+        </div>
+      </header>
+
+      <section id="home-view" class="view is-active" aria-labelledby="home-title">
+        <div class="spot-band">
+          <div class="presence-ring" aria-hidden="true">
+            <span id="presence-progress"></span>
+          </div>
+          <div>
+            <p id="presence-kicker" class="kicker">Location needed</p>
+            <h2 id="home-title">Stand where you are</h2>
+            <p id="presence-copy" class="muted">Unlock nearby traces after a quiet moment.</p>
+          </div>
+        </div>
+
+        <div class="meter-row">
+          <div class="meter">
+            <span id="meter-fill"></span>
+          </div>
+          <span id="countdown-label">30s</span>
+        </div>
+
+        <div class="stat-grid">
+          <div>
+            <span id="trace-count" class="stat-number">--</span>
+            <span class="stat-label">traces nearby</span>
+          </div>
+          <div>
+            <span id="oldest-label" class="stat-number small">--</span>
+            <span class="stat-label">oldest trace</span>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="location-button" class="button primary" type="button">Enable Location</button>
+          <button id="browse-button" class="button" type="button" disabled>Browse Traces</button>
+          <button id="leave-button" class="button" type="button" disabled>Leave Trace</button>
+        </div>
+      </section>
+
+      <section id="traces-view" class="view" aria-labelledby="traces-title">
+        <nav class="view-nav">
+          <button class="icon-button" data-view="home" type="button" aria-label="Back to current spot">‹</button>
+          <div>
+            <p class="eyebrow">Unlocked wall</p>
+            <h2 id="traces-title">Traces</h2>
+          </div>
+        </nav>
+        <div id="archives-section" class="archive-band" hidden>
+          <p class="kicker">From the archives</p>
+          <div id="archives-list"></div>
+        </div>
+        <div id="traces-list" class="trace-list"></div>
+        <p id="empty-traces" class="empty" hidden>No traces here yet.</p>
+      </section>
+
+      <section id="leave-view" class="view" aria-labelledby="leave-title">
+        <nav class="view-nav">
+          <button class="icon-button" data-view="home" type="button" aria-label="Back to current spot">‹</button>
+          <div>
+            <p class="eyebrow">Anonymous</p>
+            <h2 id="leave-title">Leave Trace</h2>
+          </div>
+        </nav>
+
+        <form id="trace-form" class="trace-form">
+          <label for="trace-text">What stays here?</label>
+          <textarea id="trace-text" maxlength="140" rows="5" placeholder="Write up to 140 characters."></textarea>
+          <div class="form-row">
+            <span id="char-count">0/140</span>
+            <button id="save-button" class="button primary" type="submit">Save</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
+

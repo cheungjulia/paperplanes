@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "Fold",
+    "slug": "fold",
+    "scheme": "fold",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "world.fold.local",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Fold uses your location to place memories on your map.",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      },
+      "appleTeamId": "BHWZ9PY428"
+    },
+    "android": {
+      "package": "world.fold.local",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-location",
+      "expo-secure-store",
+      "@rnmapbox/maps"
+    ]
+  }
+}

@@ -1,0 +1,1100 @@
+import * as Location from 'expo-location';
+import * as ImagePicker from 'expo-image-picker';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  Image,
+  Keyboard,
+  KeyboardAvoidingView,
+  Modal,
+  PanResponder,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import { Camera, LocationPuck, MapView, MarkerView } from '@rnmapbox/maps';
+import Svg, { Defs, Polyline, RadialGradient, Rect, Stop } from 'react-native-svg';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MAPBOX_STYLE_URL } from '../src/config/mapbox';
+import type { PlaneMemory, PlaneVisibility, SketchStroke } from '../src/types/memory';
+import { encodeGeohash } from '../src/utils/geohash';
+import { createMemory, echoMemory, fetchMemories } from '../src/utils/memoriesApi';
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const paperplanePin = require('../assets/paperplane-pin.png');
+
+/* ─── palette ─── */
+const C = {
+  milk: '#faf6ef',
+  cream: '#f5ede0',
+  walnut: '#3d3630',
+  clay: '#a89d8f',
+  terracotta: '#c4886a',
+  terracottaFaded: 'rgba(196, 136, 106, 0.35)',
+  glass: 'rgba(250, 246, 239, 0.82)',
+  glassDense: 'rgba(250, 246, 239, 0.92)',
+  line: 'rgba(168, 157, 143, 0.25)',
+  sketchStroke: '#8a7e72',
+  transparent: 'transparent',
+};
+
+const SERIF = Platform.OS === 'ios' ? 'Georgia' : 'serif';
+const DEFAULT_CENTER: [number, number] = [121.5654, 25.033];
+
+/* ─── helpers ─── */
+
+/** Group memories by geohash prefix (5 chars = ~5km area) for clustering */
+function groupMemoriesByArea(memories: PlaneMemory[]): Map<string, PlaneMemory[]> {
+  const groups = new Map<string, PlaneMemory[]>();
+  for (const m of memories) {
+    const key = m.geohash.slice(0, 5);
+    const list = groups.get(key) ?? [];
+    list.push(m);
+    groups.set(key, list);
+  }
+  return groups;
+}
+
+function formatTimestamp(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const month = d.toLocaleString('en', { month: 'short' });
+    const day = d.getDate();
+    const hour = d.getHours();
+    const min = d.getMinutes().toString().padStart(2, '0');
+    const ampm = hour >= 12 ? 'pm' : 'am';
+    const h = hour % 12 || 12;
+    return `${month} ${day}, ${h}:${min}${ampm}`;
+  } catch {
+    return '';
+  }
+}
+
+/* ─── main screen ─── */
+
+export default function HomeScreen() {
+  const insets = useSafeAreaInsets();
+  const cameraRef = useRef<Camera>(null);
+  const [center, setCenter] = useState<[number, number]>(DEFAULT_CENTER);
+  const [pin, setPin] = useState({ latitude: DEFAULT_CENTER[1], longitude: DEFAULT_CENTER[0] });
+  const [memories, setMemories] = useState<PlaneMemory[]>([]);
+  const [loadingLocation, setLoadingLocation] = useState(true);
+  const [pinDropMode, setPinDropMode] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [selectedGroup, setSelectedGroup] = useState<PlaneMemory[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const permission = await Location.requestForegroundPermissionsAsync();
+        if (permission.status !== 'granted') return;
+        const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        if (cancelled) return;
+        const nextCenter: [number, number] = [location.coords.longitude, location.coords.latitude];
+        setCenter(nextCenter);
+        setPin({ latitude: nextCenter[1], longitude: nextCenter[0] });
+        cameraRef.current?.setCamera({
+          centerCoordinate: nextCenter,
+          zoomLevel: 14,
+          animationDuration: 800,
+        });
+      } finally {
+        if (!cancelled) setLoadingLocation(false);
+      }
+    })();
+    loadMemories();
+    return () => { cancelled = true; };
+  }, []);
+
+  async function loadMemories() {
+    try {
+      setMemories(await fetchMemories());
+    } catch (error) {
+      console.warn('[fold] failed to load memories', error);
+    }
+  }
+
+  async function handleSave(input: SavePlaneInput) {
+    const memory = await createMemory({
+      ...input,
+      latitude: pin.latitude,
+      longitude: pin.longitude,
+      geohash: encodeGeohash(pin.latitude, pin.longitude),
+    });
+    setMemories((current) => [...current, memory]);
+    setComposerOpen(false);
+    // Zoom back out to see the new memory on the map
+    cameraRef.current?.setCamera({
+      centerCoordinate: [pin.longitude, pin.latitude],
+      zoomLevel: 14,
+      animationDuration: 500,
+    });
+  }
+
+  function enterPinDropMode() {
+    setPinDropMode(true);
+    // Reset pin to current location and zoom in tight
+    setPin({ latitude: center[1], longitude: center[0] });
+    cameraRef.current?.setCamera({
+      centerCoordinate: center,
+      zoomLevel: 17,
+      animationDuration: 500,
+    });
+  }
+
+  function confirmPinDrop() {
+    setPinDropMode(false);
+    setComposerOpen(true);
+  }
+
+  function cancelPinDrop() {
+    setPinDropMode(false);
+    // Zoom back out
+    cameraRef.current?.setCamera({
+      centerCoordinate: center,
+      zoomLevel: 14,
+      animationDuration: 500,
+    });
+  }
+
+  async function handleEcho(memory: PlaneMemory) {
+    try {
+      const next = !memory.echoed_by_me;
+      const result = await echoMemory(memory.id, next);
+      setMemories((current) =>
+        current.map((item) =>
+          item.id === memory.id
+            ? { ...item, echo_count: result.echo_count, echoed_by_me: result.echoed_by_me }
+            : item,
+        ),
+      );
+    } catch {
+      Alert.alert('Could not echo this plane.');
+    }
+  }
+
+  // Group memories for map markers
+  const grouped = useMemo(() => groupMemoriesByArea(memories), [memories]);
+
+  const foldedCount = useMemo(() => memories.filter((m) => m.visibility === 'folded').length, [memories]);
+  const freeCount = memories.length - foldedCount;
+
+  return (
+    <View style={s.screen}>
+      {/* ── map ── */}
+      <MapView
+        style={StyleSheet.absoluteFill}
+        styleURL={MAPBOX_STYLE_URL}
+        scaleBarEnabled={false}
+        compassEnabled={false}
+        scrollEnabled={!pinDropMode}
+        zoomEnabled={!pinDropMode}
+        rotateEnabled={!pinDropMode}
+        pitchEnabled={false}
+        onPress={(feature) => {
+          if (pinDropMode) {
+            const [longitude, latitude] = feature.geometry.coordinates;
+            setPin({ latitude, longitude });
+          } else if (selectedGroup) {
+            setSelectedGroup(null);
+          }
+        }}
+      >
+        <Camera
+          ref={cameraRef}
+          defaultSettings={{ centerCoordinate: center, zoomLevel: 14, pitch: 0, heading: 0 }}
+          minZoomLevel={13}
+          maxZoomLevel={18}
+        />
+        <LocationPuck visible puckBearingEnabled={false} />
+
+        {/* drop pin — only visible in pin drop mode */}
+        {pinDropMode && (
+          <MarkerView coordinate={[pin.longitude, pin.latitude]} allowOverlap>
+            <Image source={paperplanePin} style={s.pinImage} />
+          </MarkerView>
+        )}
+
+        {/* grouped memory markers */}
+        {Array.from(grouped.entries()).map(([key, group]) => {
+          const avgLng = group.reduce((sum, m) => sum + m.longitude, 0) / group.length;
+          const avgLat = group.reduce((sum, m) => sum + m.latitude, 0) / group.length;
+
+          return (
+            <MarkerView key={key} coordinate={[avgLng, avgLat]} allowOverlap>
+              <Pressable
+                onPress={() => {
+                  const sorted = [...group].sort(
+                    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+                  );
+                  setSelectedGroup(sorted);
+                }}
+                hitSlop={14}
+              >
+                <Image source={paperplanePin} style={s.markerPlane} />
+              </Pressable>
+            </MarkerView>
+          );
+        })}
+      </MapView>
+
+      {/* ── vignette overlay (SVG radial gradient) ── */}
+      <View style={StyleSheet.absoluteFill} pointerEvents="none">
+        <Svg width="100%" height="100%" preserveAspectRatio="none">
+          <Defs>
+            <RadialGradient id="vig" cx="50%" cy="50%" rx="45%" ry="42%">
+              <Stop offset="0" stopColor={C.milk} stopOpacity="0" />
+              <Stop offset="0.55" stopColor={C.milk} stopOpacity="0" />
+              <Stop offset="0.75" stopColor={C.milk} stopOpacity="0.4" />
+              <Stop offset="0.88" stopColor={C.milk} stopOpacity="0.75" />
+              <Stop offset="1" stopColor={C.milk} stopOpacity="1" />
+            </RadialGradient>
+          </Defs>
+          <Rect x="0" y="0" width="100%" height="100%" fill="url(#vig)" />
+        </Svg>
+      </View>
+
+      {/* ── floating header ── */}
+      <View style={[s.header, { paddingTop: insets.top + 16 }]} pointerEvents="none">
+        <Text style={s.appName}>Fold</Text>
+        <Text style={s.subtitle}>
+          {foldedCount} folded{' '}<Text style={s.subtitleSep}>&middot;</Text>{' '}{freeCount} in the air
+        </Text>
+      </View>
+
+      {/* ── loading ── */}
+      {loadingLocation && (
+        <View style={s.loading}>
+          <ActivityIndicator color={C.clay} size="small" />
+          <Text style={s.loadingText}>finding you...</Text>
+        </View>
+      )}
+
+      {/* ── bulletin (scrollable grouped memories) ── */}
+      {selectedGroup && (
+        <BulletinView
+          memories={selectedGroup}
+          onClose={() => setSelectedGroup(null)}
+          onEcho={handleEcho}
+          bottomInset={insets.bottom}
+        />
+      )}
+
+      {/* ── composer ── */}
+      {composerOpen && (
+        <ComposerPanel
+          onClose={() => setComposerOpen(false)}
+          onSave={handleSave}
+          bottomInset={insets.bottom}
+        />
+      )}
+
+      {/* ── pin drop mode UI ── */}
+      {pinDropMode && (
+        <View style={[s.pinDropUI, { paddingBottom: insets.bottom + 24 }]}>
+          <Text style={s.pinDropHint}>tap to drop your plane</Text>
+          <View style={s.pinDropActions}>
+            <Pressable onPress={cancelPinDrop} hitSlop={12}>
+              <Text style={s.pinDropCancel}>cancel</Text>
+            </Pressable>
+            <Pressable onPress={confirmPinDrop} style={s.pinDropConfirm}>
+              <Text style={s.pinDropConfirmText}>drop here</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {/* ── compose button ── */}
+      {!composerOpen && !selectedGroup && !pinDropMode && (
+        <View style={[s.composeButtonWrap, { paddingBottom: insets.bottom + 24 }]}>
+          <Pressable onPress={enterPinDropMode}>
+            <Image source={paperplanePin} style={s.composeButtonPlane} />
+          </Pressable>
+          <Text style={s.composeHint}>leave something here</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+/* ─── types ─── */
+
+interface SavePlaneInput {
+  body: string;
+  linkUrl?: string;
+  sketchJson: string;
+  photoBase64?: string;
+  authorName?: string;
+  visibility: PlaneVisibility;
+}
+
+/* ─────────────────────────────────────────────
+   Bulletin — scrollable list of grouped memories
+   ───────────────────────────────────────────── */
+
+function BulletinView({
+  memories,
+  onClose,
+  onEcho,
+  bottomInset,
+}: {
+  memories: PlaneMemory[];
+  onClose: () => void;
+  onEcho: (memory: PlaneMemory) => void;
+  bottomInset: number;
+}) {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  }, []);
+
+  return (
+    <Animated.View style={[s.bulletinWrap, { paddingBottom: bottomInset + 16, opacity: fadeAnim }]}>
+      <View style={s.bulletinCard}>
+        {/* header */}
+        <View style={s.bulletinHeader}>
+          <Text style={s.bulletinTitle}>
+            {memories.length} {memories.length === 1 ? 'note' : 'notes'} here
+          </Text>
+          <Pressable onPress={onClose} hitSlop={12}>
+            <Text style={s.bulletinClose}>close</Text>
+          </Pressable>
+        </View>
+
+        {/* scrollable notes */}
+        <ScrollView style={s.bulletinScroll} showsVerticalScrollIndicator={false}>
+          {memories.map((memory, i) => {
+            const strokes = safeParseStrokes(memory.sketch_json);
+            return (
+              <View key={memory.id} style={[s.noteItem, i > 0 && s.noteItemBorder]}>
+                {/* author + timestamp */}
+                <View style={s.noteMeta}>
+                  <Text style={s.noteAuthor}>
+                    {memory.author_name || 'someone'}
+                  </Text>
+                  <Text style={s.noteTime}>{formatTimestamp(memory.created_at)}</Text>
+                </View>
+
+                {/* body */}
+                <Text style={s.noteBody}>{memory.body}</Text>
+
+                {/* photo */}
+                {memory.photo_base64 ? (
+                  <Image
+                    source={{ uri: `data:image/jpeg;base64,${memory.photo_base64}` }}
+                    style={s.notePhoto}
+                    resizeMode="cover"
+                  />
+                ) : null}
+
+                {/* link */}
+                {memory.link_url ? (
+                  <Text style={s.noteLink}>{memory.link_url}</Text>
+                ) : null}
+
+                {/* sketch */}
+                {strokes.length > 0 ? <MiniSketch strokes={strokes} /> : null}
+
+                {/* echo */}
+                {memory.visibility === 'free' && (
+                  <Pressable onPress={() => onEcho(memory)} style={s.noteEchoWrap}>
+                    <Text style={[s.noteEcho, memory.echoed_by_me && s.noteEchoActive]}>
+                      {memory.echoed_by_me ? 'echoed' : 'echo'}
+                      {memory.echo_count > 0 ? ` \u00b7 ${memory.echo_count}` : ''}
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
+            );
+          })}
+        </ScrollView>
+      </View>
+    </Animated.View>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Composer
+   ───────────────────────────────────────────── */
+
+function ComposerPanel({
+  onClose,
+  onSave,
+  bottomInset,
+}: {
+  onClose: () => void;
+  onSave: (input: SavePlaneInput) => Promise<void>;
+  bottomInset: number;
+}) {
+  const insets = useSafeAreaInsets();
+  const [body, setBody] = useState('');
+  const [authorName, setAuthorName] = useState('');
+  const [linkUrl, setLinkUrl] = useState('');
+  const [showLink, setShowLink] = useState(false);
+  const [showSketch, setShowSketch] = useState(false);
+  const [strokes, setStrokes] = useState<SketchStroke[]>([]);
+  const [photoBase64, setPhotoBase64] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [releasing, setReleasing] = useState(false);
+
+  async function pickPhoto() {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 0.5,
+      base64: true,
+      allowsEditing: true,
+    });
+    if (!result.canceled && result.assets[0]?.base64) {
+      setPhotoBase64(result.assets[0].base64);
+    }
+  }
+
+  async function savePlane(visibility: PlaneVisibility) {
+    const cleanBody = body.trim() || (strokes.length ? 'A sketch left here.' : (photoBase64 ? 'A photo left here.' : ''));
+    if (!cleanBody) {
+      Alert.alert('Write, draw, or add a photo first.');
+      setReleasing(false);
+      return;
+    }
+    setSaving(true);
+    Keyboard.dismiss();
+    try {
+      await onSave({
+        body: cleanBody,
+        linkUrl: linkUrl.trim() || undefined,
+        sketchJson: JSON.stringify(strokes),
+        photoBase64: photoBase64 || undefined,
+        authorName: authorName.trim() || undefined,
+        visibility,
+      });
+    } catch (error) {
+      Alert.alert('Could not save.', error instanceof Error ? error.message : undefined);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={[s.composerModal, { paddingTop: insets.top + 8, paddingBottom: bottomInset + 20 }]}
+      >
+        {/* header row */}
+        <View style={s.composerHeader}>
+          <Pressable onPress={onClose} hitSlop={12}>
+            <Text style={s.composerHeaderText}>close</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => { Keyboard.dismiss(); setReleasing(true); }}
+            disabled={saving}
+          >
+            <Text style={s.releaseText}>done</Text>
+          </Pressable>
+        </View>
+
+        {!releasing ? (
+          <ScrollView style={{ flex: 1 }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            {/* author name */}
+            <TextInput
+              style={s.authorInput}
+              value={authorName}
+              onChangeText={setAuthorName}
+              placeholder="your name (optional)"
+              placeholderTextColor={C.clay}
+              maxLength={100}
+            />
+
+            {/* main text input */}
+            <TextInput
+              style={s.composerInput}
+              value={body}
+              onChangeText={setBody}
+              multiline
+              maxLength={500}
+              placeholder="leave something here..."
+              placeholderTextColor={C.clay}
+              autoFocus
+            />
+
+            {/* photo preview */}
+            {photoBase64 && (
+              <View style={s.photoPreviewWrap}>
+                <Image
+                  source={{ uri: `data:image/jpeg;base64,${photoBase64}` }}
+                  style={s.photoPreview}
+                  resizeMode="cover"
+                />
+                <Pressable onPress={() => setPhotoBase64(null)} style={s.photoRemove}>
+                  <Text style={s.photoRemoveText}>remove</Text>
+                </Pressable>
+              </View>
+            )}
+
+            {/* optional sketch area */}
+            {showSketch && <SketchPad strokes={strokes} setStrokes={setStrokes} />}
+
+            {/* optional link */}
+            {showLink && (
+              <TextInput
+                style={s.linkInput}
+                value={linkUrl}
+                onChangeText={setLinkUrl}
+                autoCapitalize="none"
+                keyboardType="url"
+                placeholder="https://..."
+                placeholderTextColor={C.clay}
+              />
+            )}
+
+            {/* toolbar */}
+            <View style={s.composerToolbar}>
+              <View style={s.toolbarIcons}>
+                <Pressable onPress={pickPhoto} hitSlop={10}>
+                  <Text style={[s.toolIcon, photoBase64 ? s.toolIconActive : null]}>photo</Text>
+                </Pressable>
+                <Pressable onPress={() => setShowSketch(!showSketch)} hitSlop={10}>
+                  <Text style={[s.toolIcon, showSketch && s.toolIconActive]}>pencil</Text>
+                </Pressable>
+                <Pressable onPress={() => setShowLink(!showLink)} hitSlop={10}>
+                  <Text style={[s.toolIcon, showLink && s.toolIconActive]}>link</Text>
+                </Pressable>
+                {showSketch && strokes.length > 0 && (
+                  <Pressable onPress={() => setStrokes([])} hitSlop={10}>
+                    <Text style={s.toolIconClear}>clear</Text>
+                  </Pressable>
+                )}
+              </View>
+            </View>
+          </ScrollView>
+        ) : (
+          <View style={s.releasePanel}>
+            <View style={s.releaseButtons}>
+              <Pressable disabled={saving} onPress={() => savePlane('folded')} style={s.releaseBtnFolded}>
+                <Text style={s.releaseBtnFoldedText}>keep it folded</Text>
+              </Pressable>
+              <Pressable disabled={saving} onPress={() => savePlane('free')} style={s.releaseBtnFree}>
+                <Text style={s.releaseBtnFreeText}>set it free</Text>
+              </Pressable>
+            </View>
+            <Pressable onPress={() => setReleasing(false)} disabled={saving}>
+              <Text style={s.backToEdit}>keep writing</Text>
+            </Pressable>
+          </View>
+        )}
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Sketch pad
+   ───────────────────────────────────────────── */
+
+function SketchPad({
+  strokes,
+  setStrokes,
+}: {
+  strokes: SketchStroke[];
+  setStrokes: (strokes: SketchStroke[]) => void;
+}) {
+  const currentStroke = useRef<SketchStroke | null>(null);
+  const [size, setSize] = useState({ width: 1, height: 1 });
+
+  const responder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: (event) => {
+          const { locationX, locationY } = event.nativeEvent;
+          currentStroke.current = {
+            id: `${Date.now()}`,
+            points: [{ x: locationX, y: locationY }],
+          };
+          setStrokes([...strokes, currentStroke.current]);
+        },
+        onPanResponderMove: (event) => {
+          if (!currentStroke.current) return;
+          const { locationX, locationY } = event.nativeEvent;
+          currentStroke.current = {
+            ...currentStroke.current,
+            points: [...currentStroke.current.points, { x: locationX, y: locationY }],
+          };
+          setStrokes([
+            ...strokes.filter((st) => st.id !== currentStroke.current?.id),
+            currentStroke.current,
+          ]);
+        },
+        onPanResponderRelease: () => {
+          currentStroke.current = null;
+        },
+      }),
+    [setStrokes, strokes],
+  );
+
+  return (
+    <View
+      style={s.sketchPad}
+      onLayout={(e) => setSize(e.nativeEvent.layout)}
+      {...responder.panHandlers}
+    >
+      <Svg width={size.width} height={size.height}>
+        {strokes.map((stroke) => (
+          <Polyline
+            key={stroke.id}
+            points={stroke.points.map((p) => `${p.x},${p.y}`).join(' ')}
+            fill="none"
+            stroke={C.sketchStroke}
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ))}
+      </Svg>
+    </View>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Mini sketch preview
+   ───────────────────────────────────────────── */
+
+function MiniSketch({ strokes }: { strokes: SketchStroke[] }) {
+  return (
+    <View style={s.miniSketch}>
+      <Svg width="100%" height="100%" viewBox="0 0 320 200">
+        {strokes.map((stroke) => (
+          <Polyline
+            key={stroke.id}
+            points={stroke.points.map((p) => `${p.x},${p.y}`).join(' ')}
+            fill="none"
+            stroke={C.sketchStroke}
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ))}
+      </Svg>
+    </View>
+  );
+}
+
+function safeParseStrokes(value: string): SketchStroke[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/* ─────────────────────────────────────────────
+   Styles
+   ───────────────────────────────────────────── */
+
+const s = StyleSheet.create({
+  screen: {
+    flex: 1,
+    backgroundColor: C.milk,
+  },
+
+  /* ── header ── */
+  header: {
+    position: 'absolute',
+    left: 24,
+    top: 0,
+  },
+  appName: {
+    fontFamily: SERIF,
+    fontSize: 32,
+    fontWeight: '300',
+    color: C.walnut,
+    letterSpacing: 1,
+    opacity: 0.7,
+  },
+  subtitle: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.clay,
+    marginTop: 2,
+    fontStyle: 'italic',
+  },
+  subtitleSep: {
+    color: C.clay,
+  },
+
+  /* ── pins ── */
+  pinImage: {
+    width: 40,
+    height: 40,
+    opacity: 0.8,
+  },
+  markerPlane: {
+    width: 36,
+    height: 36,
+    opacity: 0.75,
+  },
+
+  /* ── compose button ── */
+  composeButtonWrap: {
+    position: 'absolute',
+    bottom: 0,
+    alignSelf: 'center',
+    alignItems: 'center',
+  },
+  composeButtonPlane: {
+    width: 52,
+    height: 52,
+    opacity: 0.6,
+  },
+  composeHint: {
+    fontFamily: SERIF,
+    fontSize: 12,
+    color: C.clay,
+    fontStyle: 'italic',
+    marginTop: 4,
+    opacity: 0.7,
+  },
+
+  /* ── pin drop mode ── */
+  pinDropUI: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  pinDropHint: {
+    fontFamily: SERIF,
+    fontSize: 15,
+    color: C.walnut,
+    fontStyle: 'italic',
+    marginBottom: 16,
+    opacity: 0.7,
+  },
+  pinDropActions: {
+    flexDirection: 'row',
+    gap: 24,
+    alignItems: 'center',
+  },
+  pinDropCancel: {
+    fontFamily: SERIF,
+    fontSize: 15,
+    color: C.clay,
+    fontStyle: 'italic',
+  },
+  pinDropConfirm: {
+    backgroundColor: C.terracotta,
+    borderRadius: 20,
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+  },
+  pinDropConfirmText: {
+    fontFamily: SERIF,
+    fontSize: 15,
+    color: C.milk,
+    fontStyle: 'italic',
+  },
+
+  /* ── loading ── */
+  loading: {
+    position: 'absolute',
+    top: '45%',
+    alignSelf: 'center',
+    alignItems: 'center',
+    gap: 8,
+  },
+  loadingText: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.clay,
+    fontStyle: 'italic',
+  },
+
+  /* ── bulletin ── */
+  bulletinWrap: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    maxHeight: '70%',
+    paddingHorizontal: 16,
+  },
+  bulletinCard: {
+    backgroundColor: C.milk,
+    borderRadius: 20,
+    padding: 20,
+    shadowColor: C.walnut,
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 20,
+    elevation: 8,
+    maxHeight: '100%',
+  },
+  bulletinHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  bulletinTitle: {
+    fontFamily: SERIF,
+    fontSize: 14,
+    color: C.clay,
+    fontStyle: 'italic',
+  },
+  bulletinClose: {
+    fontFamily: SERIF,
+    fontSize: 14,
+    color: C.clay,
+    fontStyle: 'italic',
+  },
+  bulletinScroll: {
+    flexGrow: 0,
+  },
+
+  /* ── note item (inside bulletin) ── */
+  noteItem: {
+    paddingVertical: 14,
+  },
+  noteItemBorder: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: C.line,
+  },
+  noteMeta: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  noteAuthor: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.terracotta,
+    fontStyle: 'italic',
+  },
+  noteTime: {
+    fontFamily: SERIF,
+    fontSize: 11,
+    color: C.clay,
+    fontStyle: 'italic',
+  },
+  noteBody: {
+    fontFamily: SERIF,
+    fontSize: 16,
+    lineHeight: 23,
+    color: C.walnut,
+  },
+  notePhoto: {
+    width: '100%',
+    height: 180,
+    borderRadius: 12,
+    marginTop: 10,
+  },
+  noteLink: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.terracotta,
+    fontStyle: 'italic',
+    marginTop: 6,
+  },
+  noteEchoWrap: {
+    marginTop: 8,
+  },
+  noteEcho: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.clay,
+    fontStyle: 'italic',
+  },
+  noteEchoActive: {
+    color: C.terracotta,
+  },
+
+  /* ── composer modal ── */
+  composerModal: {
+    flex: 1,
+    backgroundColor: C.milk,
+    paddingHorizontal: 24,
+  },
+  composerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 14,
+  },
+  composerHeaderText: {
+    fontFamily: SERIF,
+    fontSize: 15,
+    color: C.clay,
+    fontStyle: 'italic',
+  },
+  authorInput: {
+    fontFamily: SERIF,
+    fontSize: 14,
+    color: C.terracotta,
+    fontStyle: 'italic',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: C.line,
+    paddingVertical: 10,
+    marginBottom: 16,
+  },
+  composerInput: {
+    fontFamily: SERIF,
+    fontSize: 20,
+    lineHeight: 30,
+    color: C.walnut,
+    minHeight: 120,
+    textAlignVertical: 'top',
+    padding: 0,
+  },
+  photoPreviewWrap: {
+    marginTop: 16,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  photoPreview: {
+    width: '100%',
+    height: 200,
+    borderRadius: 12,
+  },
+  photoRemove: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  photoRemoveText: {
+    fontFamily: SERIF,
+    fontSize: 12,
+    color: '#fff',
+    fontStyle: 'italic',
+  },
+  linkInput: {
+    fontFamily: SERIF,
+    fontSize: 15,
+    color: C.walnut,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: C.line,
+    paddingVertical: 8,
+    marginTop: 16,
+  },
+  composerToolbar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: 16,
+    paddingBottom: 4,
+  },
+  toolbarIcons: {
+    flexDirection: 'row',
+    gap: 18,
+  },
+  toolIcon: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.clay,
+    fontStyle: 'italic',
+  },
+  toolIconActive: {
+    color: C.terracotta,
+  },
+  toolIconClear: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.clay,
+    fontStyle: 'italic',
+    opacity: 0.6,
+  },
+  releaseText: {
+    fontFamily: SERIF,
+    fontSize: 15,
+    color: C.terracotta,
+    fontStyle: 'italic',
+  },
+
+  /* ── release choice ── */
+  releasePanel: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 20,
+  },
+  releaseButtons: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+  },
+  releaseBtnFolded: {
+    flex: 1,
+    height: 52,
+    borderRadius: 20,
+    backgroundColor: C.cream,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  releaseBtnFoldedText: {
+    fontFamily: SERIF,
+    fontSize: 15,
+    color: C.walnut,
+    fontStyle: 'italic',
+  },
+  releaseBtnFree: {
+    flex: 1,
+    height: 52,
+    borderRadius: 20,
+    backgroundColor: C.terracotta,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  releaseBtnFreeText: {
+    fontFamily: SERIF,
+    fontSize: 15,
+    color: C.milk,
+    fontStyle: 'italic',
+  },
+  backToEdit: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.clay,
+    fontStyle: 'italic',
+    marginTop: 20,
+  },
+
+  /* ── sketch pad ── */
+  sketchPad: {
+    height: 200,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 253, 248, 0.5)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.line,
+    overflow: 'hidden',
+    marginTop: 16,
+  },
+
+  /* ── mini sketch ── */
+  miniSketch: {
+    height: 120,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 253, 248, 0.4)',
+    marginTop: 10,
+    overflow: 'hidden',
+  },
+});

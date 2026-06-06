@@ -1,0 +1,168 @@
+:root {
+  color-scheme: light;
+  --milk: #faf6ef;
+  --cream: #f5ede0;
+  --walnut: #3d3630;
+  --clay: #a89d8f;
+  --terracotta: #c4886a;
+  --line: rgba(168, 157, 143, 0.25);
+  --glass: rgba(250, 246, 239, 0.82);
+  --glass-dense: rgba(250, 246, 239, 0.92);
+  --shadow: 0 6px 20px rgba(61, 54, 48, 0.06);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--milk);
+  color: var(--walnut);
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+.shell {
+  width: min(100%, 480px);
+  min-height: 100svh;
+  margin: 0 auto;
+  padding: 32px 24px 40px;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 0;
+  font-size: 32px;
+  font-weight: 300;
+  letter-spacing: 1px;
+  opacity: 0.7;
+}
+
+h2 {
+  margin-bottom: 8px;
+  font-size: 24px;
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+.muted {
+  color: var(--clay);
+  font-style: italic;
+  line-height: 1.5;
+}
+
+.button {
+  border: none;
+  background: var(--glass-dense);
+  color: var(--walnut);
+  border-radius: 20px;
+  min-height: 44px;
+  padding: 0 20px;
+  font-weight: 400;
+  font-style: italic;
+  cursor: pointer;
+  transition: opacity 200ms ease;
+  box-shadow: var(--shadow);
+}
+
+.button:active {
+  opacity: 0.7;
+}
+
+.button.primary {
+  background: var(--terracotta);
+  color: var(--milk);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.3;
+}
+
+textarea {
+  width: 100%;
+  resize: vertical;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  min-height: 140px;
+  padding: 16px 0;
+  background: transparent;
+  color: var(--walnut);
+  font-size: 20px;
+  line-height: 1.5;
+  outline: none;
+}
+
+textarea:focus {
+  border-bottom-color: var(--terracotta);
+}
+
+textarea::placeholder {
+  color: var(--clay);
+  font-style: italic;
+}
+
+.trace-item {
+  padding: 24px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.trace-text {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.4;
+}
+
+.trace-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--clay);
+  font-size: 13px;
+  font-style: italic;
+  margin-top: 12px;
+}
+
+.echo-button {
+  border: none;
+  background: transparent;
+  color: var(--clay);
+  font-style: italic;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.echo-button.is-active {
+  color: var(--terracotta);
+}
+
+.empty {
+  color: var(--clay);
+  font-style: italic;
+  padding: 40px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+@media (min-width: 760px) {
+  .shell {
+    padding-top: 48px;
+  }
+}

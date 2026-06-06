@@ -1,0 +1,2 @@
+"""Graffiti MVP server package."""
+
