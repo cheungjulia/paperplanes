@@ -34,16 +34,6 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 
 def init_db(path: Path | None = None) -> None:
     with connect(path) as conn:
-        # Migrate: add new columns if missing
-        try:
-            conn.execute("SELECT photo_base64 FROM memories LIMIT 0")
-        except sqlite3.OperationalError:
-            conn.execute("ALTER TABLE memories ADD COLUMN photo_base64 TEXT")
-        try:
-            conn.execute("SELECT author_name FROM memories LIMIT 0")
-        except sqlite3.OperationalError:
-            conn.execute("ALTER TABLE memories ADD COLUMN author_name TEXT")
-
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS anonymous_users (
@@ -77,6 +67,7 @@ def init_db(path: Path | None = None) -> None:
                 link_url TEXT,
                 sketch_json TEXT NOT NULL DEFAULT '[]',
                 photo_base64 TEXT,
+                photo_mime_type TEXT,
                 author_name TEXT,
                 visibility TEXT NOT NULL CHECK (visibility IN ('folded', 'free')),
                 latitude REAL NOT NULL,
@@ -103,6 +94,19 @@ def init_db(path: Path | None = None) -> None:
             );
             """
         )
+        ensure_column(conn, "memories", "photo_base64", "ALTER TABLE memories ADD COLUMN photo_base64 TEXT")
+        ensure_column(conn, "memories", "photo_mime_type", "ALTER TABLE memories ADD COLUMN photo_mime_type TEXT")
+        ensure_column(conn, "memories", "author_name", "ALTER TABLE memories ADD COLUMN author_name TEXT")
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    try:
+        conn.execute(f"SELECT {column} FROM {table} LIMIT 0")
+    except sqlite3.OperationalError as exc:
+        if "no such column" in str(exc).lower():
+            conn.execute(ddl)
+            return
+        raise
 
 
 def parse_uuid(value: str | None, *, field_name: str = "id") -> str:
@@ -309,6 +313,7 @@ def list_memories(
                 m.link_url,
                 m.sketch_json,
                 m.photo_base64,
+                m.photo_mime_type,
                 m.author_name,
                 m.visibility,
                 m.latitude,
@@ -342,6 +347,7 @@ def create_memory(
     link_url: Any = None,
     sketch_json: Any = "[]",
     photo_base64: Any = None,
+    photo_mime_type: Any = None,
     author_name: Any = None,
     path: Path | None = None,
     created_at: str | None = None,
@@ -356,6 +362,11 @@ def create_memory(
     normalized_link = str(link_url).strip() if isinstance(link_url, str) and link_url.strip() else None
     normalized_sketch = sketch_json if isinstance(sketch_json, str) and sketch_json.strip() else "[]"
     normalized_photo = str(photo_base64).strip() if isinstance(photo_base64, str) and photo_base64.strip() else None
+    normalized_photo_mime_type = (
+        str(photo_mime_type).strip()[:80]
+        if isinstance(photo_mime_type, str) and photo_mime_type.strip()
+        else None
+    )
     normalized_author = str(author_name).strip()[:100] if isinstance(author_name, str) and author_name.strip() else None
     timestamp = created_at or utc_now_iso()
 
@@ -364,10 +375,10 @@ def create_memory(
         conn.execute(
             """
             INSERT INTO memories (
-                id, body, link_url, sketch_json, photo_base64, author_name,
+                id, body, link_url, sketch_json, photo_base64, photo_mime_type, author_name,
                 visibility, latitude, longitude, geohash, created_by_anonymous_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory_id,
@@ -375,6 +386,7 @@ def create_memory(
                 normalized_link,
                 normalized_sketch,
                 normalized_photo,
+                normalized_photo_mime_type,
                 normalized_author,
                 normalized_visibility,
                 lat,
@@ -392,6 +404,7 @@ def create_memory(
                 link_url,
                 sketch_json,
                 photo_base64,
+                photo_mime_type,
                 author_name,
                 visibility,
                 latitude,
@@ -462,6 +475,7 @@ def memory_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "link_url": row["link_url"],
         "sketch_json": row["sketch_json"],
         "photo_base64": row["photo_base64"],
+        "photo_mime_type": row["photo_mime_type"],
         "author_name": row["author_name"],
         "visibility": row["visibility"],
         "latitude": float(row["latitude"]),

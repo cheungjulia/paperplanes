@@ -103,6 +103,7 @@ class GraffitiHandler(BaseHTTPRequestHandler):
                     link_url=body.get("link_url"),
                     sketch_json=body.get("sketch_json"),
                     photo_base64=body.get("photo_base64"),
+                    photo_mime_type=body.get("photo_mime_type"),
                     author_name=body.get("author_name"),
                     anonymous_user_id=user_id,
                 )

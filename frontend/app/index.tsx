@@ -18,7 +18,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Camera, LocationPuck, MapView, MarkerView } from '@rnmapbox/maps';
+import { Camera, Images, LocationPuck, MapView, MarkerView, ShapeSource, SymbolLayer } from '@rnmapbox/maps';
 import Svg, { Defs, Polyline, RadialGradient, Rect, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MAPBOX_STYLE_URL } from '../src/config/mapbox';
@@ -74,6 +74,18 @@ function formatTimestamp(iso: string): string {
   } catch {
     return '';
   }
+}
+
+function photoUri(photoBase64?: string | null, mimeType?: string | null): string | null {
+  if (!photoBase64) return null;
+  if (photoBase64.startsWith('data:')) return photoBase64;
+  const inferredMime =
+    mimeType ||
+    (photoBase64.startsWith('iVBOR') ? 'image/png' :
+      photoBase64.startsWith('R0lG') ? 'image/gif' :
+        photoBase64.startsWith('UklGR') ? 'image/webp' :
+          'image/jpeg');
+  return `data:${inferredMime};base64,${photoBase64}`;
 }
 
 /* ─── main screen ─── */
@@ -175,6 +187,15 @@ export default function HomeScreen() {
             : item,
         ),
       );
+      setSelectedGroup((current) =>
+        current
+          ? current.map((item) =>
+            item.id === memory.id
+              ? { ...item, echo_count: result.echo_count, echoed_by_me: result.echoed_by_me }
+              : item,
+          )
+          : current,
+      );
     } catch {
       Alert.alert('Could not echo this plane.');
     }
@@ -182,6 +203,26 @@ export default function HomeScreen() {
 
   // Group memories for map markers
   const grouped = useMemo(() => groupMemoriesByArea(memories), [memories]);
+  const memoryFeatureCollection = useMemo(() => ({
+    type: 'FeatureCollection' as const,
+    features: Array.from(grouped.entries()).map(([key, group]) => {
+      const longitude = group.reduce((sum, m) => sum + m.longitude, 0) / group.length;
+      const latitude = group.reduce((sum, m) => sum + m.latitude, 0) / group.length;
+      return {
+        type: 'Feature' as const,
+        id: key,
+        properties: {
+          key,
+          count: group.length,
+          countLabel: group.length > 1 ? String(group.length) : '',
+        },
+        geometry: {
+          type: 'Point' as const,
+          coordinates: [longitude, latitude],
+        },
+      };
+    }),
+  }), [grouped]);
 
   const foldedCount = useMemo(() => memories.filter((m) => m.visibility === 'folded').length, [memories]);
   const freeCount = memories.length - foldedCount;
@@ -210,9 +251,8 @@ export default function HomeScreen() {
         <Camera
           ref={cameraRef}
           defaultSettings={{ centerCoordinate: center, zoomLevel: 14, pitch: 0, heading: 0 }}
-          minZoomLevel={13}
-          maxZoomLevel={18}
         />
+        <Images images={{ paperplanePin }} />
         <LocationPuck visible puckBearingEnabled={false} />
 
         {/* drop pin — only visible in pin drop mode */}
@@ -222,27 +262,49 @@ export default function HomeScreen() {
           </MarkerView>
         )}
 
-        {/* grouped memory markers */}
-        {Array.from(grouped.entries()).map(([key, group]) => {
-          const avgLng = group.reduce((sum, m) => sum + m.longitude, 0) / group.length;
-          const avgLat = group.reduce((sum, m) => sum + m.latitude, 0) / group.length;
-
-          return (
-            <MarkerView key={key} coordinate={[avgLng, avgLat]} allowOverlap>
-              <Pressable
-                onPress={() => {
-                  const sorted = [...group].sort(
-                    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-                  );
-                  setSelectedGroup(sorted);
-                }}
-                hitSlop={14}
-              >
-                <Image source={paperplanePin} style={s.markerPlane} />
-              </Pressable>
-            </MarkerView>
-          );
-        })}
+        {/* memory planes: symbol layers stay visible across zoom levels */}
+        <ShapeSource
+          id="memory-planes"
+          shape={memoryFeatureCollection}
+          hitbox={{ width: 56, height: 56 }}
+          onPress={(event) => {
+            const key = event.features?.[0]?.properties?.key;
+            if (!key) return;
+            const group = grouped.get(String(key));
+            if (!group) return;
+            const sorted = [...group].sort(
+              (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+            );
+            setSelectedGroup(sorted);
+          }}
+        >
+          <SymbolLayer
+            id="memory-plane-symbols"
+            minZoomLevel={0}
+            maxZoomLevel={24}
+            style={{
+              iconImage: 'paperplanePin',
+              iconSize: 0.62,
+              iconAllowOverlap: true,
+              iconIgnorePlacement: true,
+            } as any}
+          />
+          <SymbolLayer
+            id="memory-plane-counts"
+            minZoomLevel={0}
+            maxZoomLevel={24}
+            style={{
+              textField: ['get', 'countLabel'],
+              textSize: 11,
+              textColor: C.walnut,
+              textHaloColor: C.milk,
+              textHaloWidth: 1.5,
+              textOffset: [1, -1.1],
+              textAllowOverlap: true,
+              textIgnorePlacement: true,
+            } as any}
+          />
+        </ShapeSource>
       </MapView>
 
       {/* ── vignette overlay (SVG radial gradient) ── */}
@@ -331,6 +393,7 @@ interface SavePlaneInput {
   linkUrl?: string;
   sketchJson: string;
   photoBase64?: string;
+  photoMimeType?: string;
   authorName?: string;
   visibility: PlaneVisibility;
 }
@@ -351,6 +414,7 @@ function BulletinView({
   bottomInset: number;
 }) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const [openedMemory, setOpenedMemory] = useState<PlaneMemory | null>(null);
 
   useEffect(() => {
     Animated.timing(fadeAnim, {
@@ -360,68 +424,101 @@ function BulletinView({
     }).start();
   }, []);
 
+  useEffect(() => {
+    if (!openedMemory) return;
+    const fresh = memories.find((memory) => memory.id === openedMemory.id);
+    if (fresh) setOpenedMemory(fresh);
+  }, [memories, openedMemory?.id]);
+
   return (
     <Animated.View style={[s.bulletinWrap, { paddingBottom: bottomInset + 16, opacity: fadeAnim }]}>
       <View style={s.bulletinCard}>
-        {/* header */}
         <View style={s.bulletinHeader}>
           <Text style={s.bulletinTitle}>
-            {memories.length} {memories.length === 1 ? 'note' : 'notes'} here
+            {openedMemory ? 'unfolded note' : `${memories.length} ${memories.length === 1 ? 'note' : 'notes'} here`}
           </Text>
-          <Pressable onPress={onClose} hitSlop={12}>
-            <Text style={s.bulletinClose}>close</Text>
+          <Pressable onPress={openedMemory ? () => setOpenedMemory(null) : onClose} hitSlop={12}>
+            <Text style={s.bulletinClose}>{openedMemory ? 'back' : 'close'}</Text>
           </Pressable>
         </View>
 
-        {/* scrollable notes */}
-        <ScrollView style={s.bulletinScroll} showsVerticalScrollIndicator={false}>
-          {memories.map((memory, i) => {
-            const strokes = safeParseStrokes(memory.sketch_json);
-            return (
-              <View key={memory.id} style={[s.noteItem, i > 0 && s.noteItemBorder]}>
-                {/* author + timestamp */}
+        {openedMemory ? (
+          <UnfoldedNote memory={openedMemory} onEcho={onEcho} />
+        ) : (
+          <ScrollView
+            horizontal
+            style={s.bulletinScroll}
+            contentContainerStyle={s.bulletinCards}
+            showsHorizontalScrollIndicator={false}
+          >
+            {memories.map((memory, i) => (
+              <Pressable
+                key={memory.id}
+                style={[s.boardNoteCard, i % 2 === 1 && s.boardNoteCardTilt]}
+                onPress={() => setOpenedMemory(memory)}
+              >
+                <View style={s.notePin} />
                 <View style={s.noteMeta}>
-                  <Text style={s.noteAuthor}>
-                    {memory.author_name || 'someone'}
-                  </Text>
+                  <Text style={s.noteAuthor}>{memory.author_name || 'someone'}</Text>
                   <Text style={s.noteTime}>{formatTimestamp(memory.created_at)}</Text>
                 </View>
-
-                {/* body */}
-                <Text style={s.noteBody}>{memory.body}</Text>
-
-                {/* photo */}
-                {memory.photo_base64 ? (
+                {photoUri(memory.photo_base64, memory.photo_mime_type) ? (
                   <Image
-                    source={{ uri: `data:image/jpeg;base64,${memory.photo_base64}` }}
-                    style={s.notePhoto}
+                    source={{ uri: photoUri(memory.photo_base64, memory.photo_mime_type)! }}
+                    style={s.boardPhoto}
                     resizeMode="cover"
                   />
                 ) : null}
-
-                {/* link */}
-                {memory.link_url ? (
-                  <Text style={s.noteLink}>{memory.link_url}</Text>
-                ) : null}
-
-                {/* sketch */}
-                {strokes.length > 0 ? <MiniSketch strokes={strokes} /> : null}
-
-                {/* echo */}
-                {memory.visibility === 'free' && (
-                  <Pressable onPress={() => onEcho(memory)} style={s.noteEchoWrap}>
-                    <Text style={[s.noteEcho, memory.echoed_by_me && s.noteEchoActive]}>
-                      {memory.echoed_by_me ? 'echoed' : 'echo'}
-                      {memory.echo_count > 0 ? ` \u00b7 ${memory.echo_count}` : ''}
-                    </Text>
-                  </Pressable>
-                )}
-              </View>
-            );
-          })}
-        </ScrollView>
+                <Text style={s.boardNoteBody} numberOfLines={5}>{memory.body}</Text>
+                <Text style={s.boardOpenHint}>tap to unfold</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        )}
       </View>
     </Animated.View>
+  );
+}
+
+function UnfoldedNote({
+  memory,
+  onEcho,
+}: {
+  memory: PlaneMemory;
+  onEcho: (memory: PlaneMemory) => void;
+}) {
+  const strokes = safeParseStrokes(memory.sketch_json);
+  const uri = photoUri(memory.photo_base64, memory.photo_mime_type);
+
+  return (
+    <ScrollView style={s.unfoldedScroll} showsVerticalScrollIndicator={false}>
+      <View style={s.unfoldedPaper}>
+        <View style={s.noteMeta}>
+          <Text style={s.noteAuthor}>{memory.author_name || 'someone'}</Text>
+          <Text style={s.noteTime}>{formatTimestamp(memory.created_at)}</Text>
+        </View>
+        <Text style={s.noteBody}>{memory.body}</Text>
+        {uri ? (
+          <Image
+            source={{ uri }}
+            style={s.notePhoto}
+            resizeMode="cover"
+          />
+        ) : null}
+        {memory.link_url ? (
+          <Text style={s.noteLink}>{memory.link_url}</Text>
+        ) : null}
+        {strokes.length > 0 ? <MiniSketch strokes={strokes} /> : null}
+        {memory.visibility === 'free' && (
+          <Pressable onPress={() => onEcho(memory)} style={s.noteEchoWrap}>
+            <Text style={[s.noteEcho, memory.echoed_by_me && s.noteEchoActive]}>
+              {memory.echoed_by_me ? 'echoed' : 'echo'}
+              {memory.echo_count > 0 ? ` \u00b7 ${memory.echo_count}` : ''}
+            </Text>
+          </Pressable>
+        )}
+      </View>
+    </ScrollView>
   );
 }
 
@@ -446,6 +543,7 @@ function ComposerPanel({
   const [showSketch, setShowSketch] = useState(false);
   const [strokes, setStrokes] = useState<SketchStroke[]>([]);
   const [photoBase64, setPhotoBase64] = useState<string | null>(null);
+  const [photoMimeType, setPhotoMimeType] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [releasing, setReleasing] = useState(false);
 
@@ -456,8 +554,10 @@ function ComposerPanel({
       base64: true,
       allowsEditing: true,
     });
-    if (!result.canceled && result.assets[0]?.base64) {
-      setPhotoBase64(result.assets[0].base64);
+    const asset = result.assets?.[0];
+    if (!result.canceled && asset?.base64) {
+      setPhotoBase64(asset.base64);
+      setPhotoMimeType(asset.mimeType ?? 'image/jpeg');
     }
   }
 
@@ -476,6 +576,7 @@ function ComposerPanel({
         linkUrl: linkUrl.trim() || undefined,
         sketchJson: JSON.stringify(strokes),
         photoBase64: photoBase64 || undefined,
+        photoMimeType: photoMimeType || undefined,
         authorName: authorName.trim() || undefined,
         visibility,
       });
@@ -533,11 +634,17 @@ function ComposerPanel({
             {photoBase64 && (
               <View style={s.photoPreviewWrap}>
                 <Image
-                  source={{ uri: `data:image/jpeg;base64,${photoBase64}` }}
+                  source={{ uri: photoUri(photoBase64, photoMimeType)! }}
                   style={s.photoPreview}
                   resizeMode="cover"
                 />
-                <Pressable onPress={() => setPhotoBase64(null)} style={s.photoRemove}>
+                <Pressable
+                  onPress={() => {
+                    setPhotoBase64(null);
+                    setPhotoMimeType(null);
+                  }}
+                  style={s.photoRemove}
+                >
                   <Text style={s.photoRemoveText}>remove</Text>
                 </Pressable>
               </View>
@@ -865,6 +972,65 @@ const s = StyleSheet.create({
   },
   bulletinScroll: {
     flexGrow: 0,
+  },
+  bulletinCards: {
+    gap: 14,
+    paddingVertical: 6,
+    paddingRight: 4,
+  },
+  boardNoteCard: {
+    width: 210,
+    minHeight: 220,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255, 253, 248, 0.92)',
+    padding: 14,
+    shadowColor: C.walnut,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    elevation: 3,
+    transform: [{ rotate: '-1.5deg' }],
+  },
+  boardNoteCardTilt: {
+    transform: [{ rotate: '1deg' }],
+  },
+  notePin: {
+    position: 'absolute',
+    top: 8,
+    alignSelf: 'center',
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: C.terracottaFaded,
+  },
+  boardPhoto: {
+    width: '100%',
+    height: 86,
+    borderRadius: 5,
+    marginBottom: 9,
+    marginTop: 4,
+  },
+  boardNoteBody: {
+    fontFamily: SERIF,
+    fontSize: 16,
+    lineHeight: 22,
+    color: C.walnut,
+    marginTop: 4,
+  },
+  boardOpenHint: {
+    fontFamily: SERIF,
+    fontSize: 11,
+    color: C.clay,
+    fontStyle: 'italic',
+    marginTop: 10,
+  },
+  unfoldedScroll: {
+    maxHeight: 420,
+  },
+  unfoldedPaper: {
+    borderRadius: 7,
+    backgroundColor: 'rgba(255, 253, 248, 0.94)',
+    padding: 16,
   },
 
   /* ── note item (inside bulletin) ── */

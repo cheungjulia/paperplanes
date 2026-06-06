@@ -30,6 +30,12 @@
       "expo-router",
       "expo-location",
       "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Fold lets you attach photos to memories."
+        }
+      ],
       "@rnmapbox/maps"
     ]
   }

@@ -106,6 +106,22 @@ class DbTest(unittest.TestCase):
 
         self.assertEqual(memories, [])
 
+    def test_memory_photo_round_trips_with_mime_type(self):
+        memory = db.create_memory(
+            body="photo",
+            latitude=25.0,
+            longitude=121.0,
+            geohash="wsqqqm1",
+            visibility="free",
+            anonymous_user_id=USER_ID,
+            photo_base64="abc123",
+            photo_mime_type="image/png",
+            path=self.path,
+        )
+
+        self.assertEqual(memory["photo_base64"], "abc123")
+        self.assertEqual(memory["photo_mime_type"], "image/png")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ export interface PlaneMemory {
   link_url: string | null;
   sketch_json: string;
   photo_base64: string | null;
+  photo_mime_type: string | null;
   author_name: string | null;
   visibility: PlaneVisibility;
   latitude: number;

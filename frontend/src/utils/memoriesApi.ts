@@ -7,6 +7,7 @@ interface CreateMemoryInput {
   linkUrl?: string;
   sketchJson?: string;
   photoBase64?: string;
+  photoMimeType?: string;
   authorName?: string;
   visibility: PlaneVisibility;
   latitude: number;
@@ -44,6 +45,7 @@ export async function createMemory(input: CreateMemoryInput): Promise<PlaneMemor
       link_url: input.linkUrl,
       sketch_json: input.sketchJson ?? '[]',
       photo_base64: input.photoBase64,
+      photo_mime_type: input.photoMimeType,
       author_name: input.authorName,
       visibility: input.visibility,
       latitude: input.latitude,
@@ -59,4 +61,3 @@ export async function echoMemory(memoryId: string, enabled: boolean): Promise<{ 
     method: enabled ? 'POST' : 'DELETE',
   });
 }
-
