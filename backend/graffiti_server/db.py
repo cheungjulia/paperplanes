@@ -69,6 +69,11 @@ def init_db(path: Path | None = None) -> None:
                 photo_base64 TEXT,
                 photo_mime_type TEXT,
                 author_name TEXT,
+                kind TEXT,
+                recipient_name TEXT,
+                arrives_at TEXT,
+                origin_latitude REAL,
+                origin_longitude REAL,
                 visibility TEXT NOT NULL CHECK (visibility IN ('folded', 'free')),
                 latitude REAL NOT NULL,
                 longitude REAL NOT NULL,
@@ -97,6 +102,11 @@ def init_db(path: Path | None = None) -> None:
         ensure_column(conn, "memories", "photo_base64", "ALTER TABLE memories ADD COLUMN photo_base64 TEXT")
         ensure_column(conn, "memories", "photo_mime_type", "ALTER TABLE memories ADD COLUMN photo_mime_type TEXT")
         ensure_column(conn, "memories", "author_name", "ALTER TABLE memories ADD COLUMN author_name TEXT")
+        ensure_column(conn, "memories", "kind", "ALTER TABLE memories ADD COLUMN kind TEXT")
+        ensure_column(conn, "memories", "recipient_name", "ALTER TABLE memories ADD COLUMN recipient_name TEXT")
+        ensure_column(conn, "memories", "arrives_at", "ALTER TABLE memories ADD COLUMN arrives_at TEXT")
+        ensure_column(conn, "memories", "origin_latitude", "ALTER TABLE memories ADD COLUMN origin_latitude REAL")
+        ensure_column(conn, "memories", "origin_longitude", "ALTER TABLE memories ADD COLUMN origin_longitude REAL")
 
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -155,6 +165,14 @@ def normalize_memory_body(text: Any) -> str:
 def normalize_visibility(value: Any) -> str:
     if value not in {"folded", "free"}:
         raise ValueError("visibility must be folded or free")
+    return str(value)
+
+
+def normalize_kind(value: Any, visibility: str) -> str:
+    if value is None:
+        return "private" if visibility == "folded" else "public"
+    if value not in {"private", "public", "directed"}:
+        raise ValueError("kind must be private, public, or directed")
     return str(value)
 
 
@@ -315,6 +333,11 @@ def list_memories(
                 m.photo_base64,
                 m.photo_mime_type,
                 m.author_name,
+                m.kind,
+                m.recipient_name,
+                m.arrives_at,
+                m.origin_latitude,
+                m.origin_longitude,
                 m.visibility,
                 m.latitude,
                 m.longitude,
@@ -349,6 +372,11 @@ def create_memory(
     photo_base64: Any = None,
     photo_mime_type: Any = None,
     author_name: Any = None,
+    kind: Any = None,
+    recipient_name: Any = None,
+    arrives_at: Any = None,
+    origin_latitude: Any = None,
+    origin_longitude: Any = None,
     path: Path | None = None,
     created_at: str | None = None,
 ) -> dict[str, Any]:
@@ -359,6 +387,7 @@ def create_memory(
     lat = normalize_coordinate(latitude, field_name="latitude", min_value=-90, max_value=90)
     lng = normalize_coordinate(longitude, field_name="longitude", min_value=-180, max_value=180)
     normalized_visibility = normalize_visibility(visibility)
+    normalized_kind = normalize_kind(kind, normalized_visibility)
     normalized_link = str(link_url).strip() if isinstance(link_url, str) and link_url.strip() else None
     normalized_sketch = sketch_json if isinstance(sketch_json, str) and sketch_json.strip() else "[]"
     normalized_photo = str(photo_base64).strip() if isinstance(photo_base64, str) and photo_base64.strip() else None
@@ -368,6 +397,22 @@ def create_memory(
         else None
     )
     normalized_author = str(author_name).strip()[:100] if isinstance(author_name, str) and author_name.strip() else None
+    normalized_recipient = (
+        str(recipient_name).strip()[:100]
+        if isinstance(recipient_name, str) and recipient_name.strip()
+        else None
+    )
+    normalized_arrives_at = str(arrives_at).strip() if isinstance(arrives_at, str) and arrives_at.strip() else None
+    normalized_origin_lat = (
+        normalize_coordinate(origin_latitude, field_name="origin latitude", min_value=-90, max_value=90)
+        if origin_latitude is not None
+        else None
+    )
+    normalized_origin_lng = (
+        normalize_coordinate(origin_longitude, field_name="origin longitude", min_value=-180, max_value=180)
+        if origin_longitude is not None
+        else None
+    )
     timestamp = created_at or utc_now_iso()
 
     with connect(path) as conn:
@@ -376,9 +421,10 @@ def create_memory(
             """
             INSERT INTO memories (
                 id, body, link_url, sketch_json, photo_base64, photo_mime_type, author_name,
-                visibility, latitude, longitude, geohash, created_by_anonymous_id, created_at
+                kind, recipient_name, arrives_at, origin_latitude, origin_longitude, visibility,
+                latitude, longitude, geohash, created_by_anonymous_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory_id,
@@ -388,6 +434,11 @@ def create_memory(
                 normalized_photo,
                 normalized_photo_mime_type,
                 normalized_author,
+                normalized_kind,
+                normalized_recipient,
+                normalized_arrives_at,
+                normalized_origin_lat,
+                normalized_origin_lng,
                 normalized_visibility,
                 lat,
                 lng,
@@ -406,6 +457,11 @@ def create_memory(
                 photo_base64,
                 photo_mime_type,
                 author_name,
+                kind,
+                recipient_name,
+                arrives_at,
+                origin_latitude,
+                origin_longitude,
                 visibility,
                 latitude,
                 longitude,
@@ -477,6 +533,11 @@ def memory_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "photo_base64": row["photo_base64"],
         "photo_mime_type": row["photo_mime_type"],
         "author_name": row["author_name"],
+        "kind": row["kind"] or ("private" if row["visibility"] == "folded" else "public"),
+        "recipient_name": row["recipient_name"],
+        "arrives_at": row["arrives_at"],
+        "origin_latitude": float(row["origin_latitude"]) if row["origin_latitude"] is not None else None,
+        "origin_longitude": float(row["origin_longitude"]) if row["origin_longitude"] is not None else None,
         "visibility": row["visibility"],
         "latitude": float(row["latitude"]),
         "longitude": float(row["longitude"]),

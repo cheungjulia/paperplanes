@@ -18,11 +18,11 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Camera, Images, LocationPuck, MapView, MarkerView, ShapeSource, SymbolLayer } from '@rnmapbox/maps';
+import { Camera, Images, LineLayer, LocationPuck, MapView, MarkerView, ShapeSource, SymbolLayer } from '@rnmapbox/maps';
 import Svg, { Defs, Polyline, RadialGradient, Rect, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MAPBOX_STYLE_URL } from '../src/config/mapbox';
-import type { PlaneMemory, PlaneVisibility, SketchStroke } from '../src/types/memory';
+import type { PlaneKind, PlaneMemory, PlaneVisibility, SketchStroke } from '../src/types/memory';
 import { encodeGeohash } from '../src/utils/geohash';
 import { createMemory, echoMemory, fetchMemories } from '../src/utils/memoriesApi';
 
@@ -50,13 +50,28 @@ const C = {
 const SERIF = Platform.OS === 'ios' ? 'Georgia' : 'serif';
 const DEFAULT_CENTER: [number, number] = [121.5654, 25.033];
 
+const DEMO_FRIENDS = [
+  { id: 'mina', name: 'Mina' },
+  { id: 'jules', name: 'Jules' },
+  { id: 'kai', name: 'Kai' },
+  { id: 'ren', name: 'Ren' },
+] as const;
+
+const DEMO_DELAYS = [
+  { id: 'soon', label: 'soon', minutes: 5 },
+  { id: 'tonight', label: 'tonight', minutes: 180 },
+  { id: 'tomorrow', label: 'tomorrow', minutes: 24 * 60 },
+] as const;
+
 /* ─── helpers ─── */
 
-/** Group memories by geohash prefix (5 chars = ~5km area) for clustering */
+const PIN_KINDS: PlaneKind[] = ['private', 'public', 'directed'];
+
+/** Group memories by exact geohash cell so seeded clusters stay as distinct pins. */
 function groupMemoriesByArea(memories: PlaneMemory[]): Map<string, PlaneMemory[]> {
   const groups = new Map<string, PlaneMemory[]>();
   for (const m of memories) {
-    const key = m.geohash.slice(0, 5);
+    const key = m.geohash;
     const list = groups.get(key) ?? [];
     list.push(m);
     groups.set(key, list);
@@ -64,10 +79,56 @@ function groupMemoriesByArea(memories: PlaneMemory[]): Map<string, PlaneMemory[]
   return groups;
 }
 
+function groupMemoriesByPinKind(memories: PlaneMemory[]): Record<PlaneKind, Map<string, PlaneMemory[]>> {
+  return PIN_KINDS.reduce((groups, kind) => {
+    groups[kind] = groupMemoriesByArea(memories.filter((memory) => pinKindForMemory(memory) === kind));
+    return groups;
+  }, {} as Record<PlaneKind, Map<string, PlaneMemory[]>>);
+}
+
+function pinKindForMemory(memory: PlaneMemory): PlaneKind {
+  if (memory.kind === 'directed') return 'directed';
+  return memory.visibility === 'folded' ? 'private' : 'public';
+}
+
+function hasActiveFlightPath(
+  memory: PlaneMemory,
+  nowMs: number,
+): memory is PlaneMemory & { origin_latitude: number; origin_longitude: number } {
+  if (pinKindForMemory(memory) !== 'directed') return false;
+  if (typeof memory.origin_latitude !== 'number' || typeof memory.origin_longitude !== 'number') return false;
+  if (!memory.arrives_at) return true;
+  const arrivesAtMs = Date.parse(memory.arrives_at);
+  return Number.isNaN(arrivesAtMs) || arrivesAtMs > nowMs;
+}
+
+function featureCollectionForGroups(groups: Map<string, PlaneMemory[]>) {
+  return {
+    type: 'FeatureCollection' as const,
+    features: Array.from(groups.entries()).map(([key, group]) => {
+      const longitude = group.reduce((sum, m) => sum + m.longitude, 0) / group.length;
+      const latitude = group.reduce((sum, m) => sum + m.latitude, 0) / group.length;
+      return {
+        type: 'Feature' as const,
+        id: key,
+        properties: {
+          key,
+          count: group.length,
+          countLabel: group.length > 1 ? String(group.length) : '',
+        },
+        geometry: {
+          type: 'Point' as const,
+          coordinates: [longitude, latitude],
+        },
+      };
+    }),
+  };
+}
+
 function formatTimestamp(iso: string): string {
   try {
     const d = new Date(iso);
-    const month = d.toLocaleString('en', { month: 'short' });
+    const month = d.toLocaleString('en', { month: 'short' }).toLowerCase();
     const day = d.getDate();
     const hour = d.getHours();
     const min = d.getMinutes().toString().padStart(2, '0');
@@ -97,12 +158,14 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const cameraRef = useRef<Camera>(null);
   const [center, setCenter] = useState<[number, number]>(DEFAULT_CENTER);
+  const [userCenter, setUserCenter] = useState<[number, number]>(DEFAULT_CENTER);
   const [pin, setPin] = useState({ latitude: DEFAULT_CENTER[1], longitude: DEFAULT_CENTER[0] });
   const [memories, setMemories] = useState<PlaneMemory[]>([]);
   const [loadingLocation, setLoadingLocation] = useState(true);
   const [pinDropMode, setPinDropMode] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [selectedGroup, setSelectedGroup] = useState<PlaneMemory[] | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
     let cancelled = false;
@@ -114,6 +177,7 @@ export default function HomeScreen() {
         if (cancelled) return;
         const nextCenter: [number, number] = [location.coords.longitude, location.coords.latitude];
         setCenter(nextCenter);
+        setUserCenter(nextCenter);
         setPin({ latitude: nextCenter[1], longitude: nextCenter[0] });
         cameraRef.current?.setCamera({
           centerCoordinate: nextCenter,
@@ -126,6 +190,11 @@ export default function HomeScreen() {
     })();
     loadMemories();
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(timer);
   }, []);
 
   async function loadMemories() {
@@ -142,6 +211,8 @@ export default function HomeScreen() {
       latitude: pin.latitude,
       longitude: pin.longitude,
       geohash: encodeGeohash(pin.latitude, pin.longitude),
+      originLatitude: input.kind === 'directed' ? userCenter[1] : undefined,
+      originLongitude: input.kind === 'directed' ? userCenter[0] : undefined,
     });
     setMemories((current) => [...current, memory]);
     setComposerOpen(false);
@@ -200,35 +271,49 @@ export default function HomeScreen() {
           : current,
       );
     } catch {
-      Alert.alert('Could not echo this plane.');
+      Alert.alert('could not echo this plane.');
     }
   }
 
-  // Group memories for map markers
-  const grouped = useMemo(() => groupMemoriesByArea(memories), [memories]);
-  const memoryFeatureCollection = useMemo(() => ({
+  // Group memories into separate pin kinds so each state gets its own map icon.
+  const groupsByKind = useMemo(() => groupMemoriesByPinKind(memories), [memories]);
+  const featureCollectionsByKind = useMemo(() => ({
+    private: featureCollectionForGroups(groupsByKind.private),
+    public: featureCollectionForGroups(groupsByKind.public),
+    directed: featureCollectionForGroups(groupsByKind.directed),
+  }), [groupsByKind]);
+  const directedRouteCollection = useMemo(() => ({
     type: 'FeatureCollection' as const,
-    features: Array.from(grouped.entries()).map(([key, group]) => {
-      const longitude = group.reduce((sum, m) => sum + m.longitude, 0) / group.length;
-      const latitude = group.reduce((sum, m) => sum + m.latitude, 0) / group.length;
-      return {
+    features: memories
+      .filter((memory) => hasActiveFlightPath(memory, nowMs))
+      .map((memory) => ({
         type: 'Feature' as const,
-        id: key,
+        id: `${memory.id}-route`,
         properties: {
-          key,
-          count: group.length,
-          countLabel: group.length > 1 ? String(group.length) : '',
+          id: memory.id,
         },
         geometry: {
-          type: 'Point' as const,
-          coordinates: [longitude, latitude],
+          type: 'LineString' as const,
+          coordinates: [
+            [memory.origin_longitude, memory.origin_latitude],
+            [memory.longitude, memory.latitude],
+          ],
         },
-      };
-    }),
-  }), [grouped]);
+      })),
+  }), [memories, nowMs]);
 
-  const foldedCount = useMemo(() => memories.filter((m) => m.visibility === 'folded').length, [memories]);
-  const freeCount = memories.length - foldedCount;
+  function openMemoryGroup(kind: PlaneKind, key: string) {
+    const group = groupsByKind[kind].get(key);
+    if (!group) return;
+    const sorted = [...group].sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+    );
+    setSelectedGroup(sorted);
+  }
+
+  const foldedCount = useMemo(() => memories.filter((m) => pinKindForMemory(m) === 'private').length, [memories]);
+  const freeCount = useMemo(() => memories.filter((m) => pinKindForMemory(m) === 'public').length, [memories]);
+  const sentCount = useMemo(() => memories.filter((m) => pinKindForMemory(m) === 'directed').length, [memories]);
 
   return (
     <View style={s.screen}>
@@ -261,7 +346,7 @@ export default function HomeScreen() {
           ref={cameraRef}
           defaultSettings={{ centerCoordinate: center, zoomLevel: 14, pitch: 0, heading: 0 }}
         />
-        <Images images={{ paperplanePin }} />
+        <Images images={{ paperplanePin, paperOpenPin: paperOpenImg, scrunchedPin: scrunchedImg }} />
         <LocationPuck visible puckBearingEnabled={false} />
 
         {/* drop pin — only visible in pin drop mode */}
@@ -271,49 +356,47 @@ export default function HomeScreen() {
           </MarkerView>
         )}
 
-        {/* memory planes: symbol layers stay visible across zoom levels */}
-        <ShapeSource
-          id="memory-planes"
-          shape={memoryFeatureCollection}
-          hitbox={{ width: 96, height: 96 }}
-          onPress={(event) => {
-            const key = event.features?.[0]?.properties?.key;
-            if (!key) return;
-            const group = grouped.get(String(key));
-            if (!group) return;
-            const sorted = [...group].sort(
-              (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-            );
-            setSelectedGroup(sorted);
-          }}
-        >
-          <SymbolLayer
-            id="memory-plane-symbols"
+        <ShapeSource id="directed-plane-routes" shape={directedRouteCollection}>
+          <LineLayer
+            id="directed-plane-route-lines"
             minZoomLevel={0}
             maxZoomLevel={24}
             style={{
-              iconImage: 'paperplanePin',
-              iconSize: 1.7,
-              iconAllowOverlap: true,
-              iconIgnorePlacement: true,
-            } as any}
-          />
-          <SymbolLayer
-            id="memory-plane-counts"
-            minZoomLevel={0}
-            maxZoomLevel={24}
-            style={{
-              textField: ['get', 'countLabel'],
-              textSize: 11,
-              textColor: C.walnut,
-              textHaloColor: C.milk,
-              textHaloWidth: 1.5,
-              textOffset: [1, -1.1],
-              textAllowOverlap: true,
-              textIgnorePlacement: true,
+              lineColor: C.terracotta,
+              lineWidth: 2,
+              lineOpacity: 0.7,
+              lineDasharray: [1.5, 2.2],
+              lineCap: 'round',
+              lineJoin: 'round',
             } as any}
           />
         </ShapeSource>
+
+        {/* memory pins: private = scrunched, public = open paper, directed = paper plane */}
+        <MemoryPinLayer
+          id="private-memory-pins"
+          iconImage="scrunchedPin"
+          shape={featureCollectionsByKind.private}
+          onOpen={(key) => openMemoryGroup('private', key)}
+          iconSize={1.05}
+          iconTranslate={[-18, 0]}
+        />
+        <MemoryPinLayer
+          id="public-memory-pins"
+          iconImage="paperOpenPin"
+          shape={featureCollectionsByKind.public}
+          onOpen={(key) => openMemoryGroup('public', key)}
+          iconSize={1.05}
+          iconTranslate={[18, 0]}
+        />
+        <MemoryPinLayer
+          id="directed-memory-pins"
+          iconImage="paperplanePin"
+          shape={featureCollectionsByKind.directed}
+          onOpen={(key) => openMemoryGroup('directed', key)}
+          iconSize={3.0}
+          iconTranslate={[0, -18]}
+        />
       </MapView>
 
       {/* ── vignette overlay (SVG radial gradient) ── */}
@@ -334,9 +417,11 @@ export default function HomeScreen() {
 
       {/* ── floating header ── */}
       <View style={[s.header, { paddingTop: insets.top + 16 }]} pointerEvents="none">
-        <Text style={s.appName}>Fold</Text>
+        <Text style={s.appName}>fold</Text>
         <Text style={s.subtitle}>
-          {foldedCount} folded{' '}<Text style={s.subtitleSep}>&middot;</Text>{' '}{freeCount} in the air
+          {foldedCount} folded{' '}<Text style={s.subtitleSep}>&middot;</Text>{' '}
+          {freeCount} in the air{' '}<Text style={s.subtitleSep}>&middot;</Text>{' '}
+          {sentCount} sent
         </Text>
       </View>
 
@@ -395,6 +480,62 @@ export default function HomeScreen() {
   );
 }
 
+function MemoryPinLayer({
+  id,
+  iconImage,
+  shape,
+  iconSize,
+  iconTranslate,
+  onOpen,
+}: {
+  id: string;
+  iconImage: string;
+  shape: ReturnType<typeof featureCollectionForGroups>;
+  iconSize: number;
+  iconTranslate: [number, number];
+  onOpen: (key: string) => void;
+}) {
+  return (
+    <ShapeSource
+      id={id}
+      shape={shape}
+      hitbox={{ width: 112, height: 112 }}
+      onPress={(event) => {
+        const key = event.features?.[0]?.properties?.key;
+        if (key) onOpen(String(key));
+      }}
+    >
+      <SymbolLayer
+        id={`${id}-symbols`}
+        minZoomLevel={0}
+        maxZoomLevel={24}
+        style={{
+          iconImage,
+          iconSize,
+          iconTranslate,
+          iconAllowOverlap: true,
+          iconIgnorePlacement: true,
+        } as any}
+      />
+      <SymbolLayer
+        id={`${id}-counts`}
+        minZoomLevel={0}
+        maxZoomLevel={24}
+        style={{
+          textField: ['get', 'countLabel'],
+          textSize: 11,
+          textColor: C.walnut,
+          textHaloColor: C.milk,
+          textHaloWidth: 1.5,
+          textTranslate: [iconTranslate[0] + 30, iconTranslate[1] - 24],
+          textAllowOverlap: true,
+          textIgnorePlacement: true,
+        } as any}
+      />
+    </ShapeSource>
+  );
+}
+
 /* ─── types ─── */
 
 interface SavePlaneInput {
@@ -404,6 +545,9 @@ interface SavePlaneInput {
   photoBase64?: string;
   photoMimeType?: string;
   authorName?: string;
+  kind?: PlaneKind;
+  recipientName?: string;
+  arrivesAt?: string;
   visibility: PlaneVisibility;
 }
 
@@ -493,6 +637,9 @@ function BulletinView({
                 >
                   <View style={s.scatteredPin} />
                   <Text style={s.scatteredAuthor}>{memory.author_name || 'someone'}</Text>
+                  {pinKindForMemory(memory) === 'directed' ? (
+                    <Text style={s.scatteredSent}>to {memory.recipient_name || 'a friend'}</Text>
+                  ) : null}
                   {uri ? (
                     <Image source={{ uri }} style={s.scatteredPhoto} resizeMode="cover" />
                   ) : null}
@@ -525,6 +672,12 @@ function UnfoldedNote({
           <Text style={s.noteAuthor}>{memory.author_name || 'someone'}</Text>
           <Text style={s.noteTime}>{formatTimestamp(memory.created_at)}</Text>
         </View>
+        {pinKindForMemory(memory) === 'directed' ? (
+          <Text style={s.sentMeta}>
+            to {memory.recipient_name || 'a friend'}
+            {memory.arrives_at ? ` · arrives ${formatTimestamp(memory.arrives_at)}` : ''}
+          </Text>
+        ) : null}
         <Text style={s.noteBody}>{memory.body}</Text>
         {uri ? (
           <Image source={{ uri }} style={s.notePhoto} resizeMode="cover" />
@@ -570,6 +723,9 @@ function ComposerPanel({
   const [photoMimeType, setPhotoMimeType] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [releasing, setReleasing] = useState(false);
+  const [sendMode, setSendMode] = useState(false);
+  const [selectedFriendId, setSelectedFriendId] = useState<(typeof DEMO_FRIENDS)[number]['id']>(DEMO_FRIENDS[0].id);
+  const [selectedDelayId, setSelectedDelayId] = useState<(typeof DEMO_DELAYS)[number]['id']>(DEMO_DELAYS[0].id);
 
   async function pickPhoto() {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -585,10 +741,17 @@ function ComposerPanel({
     }
   }
 
-  async function savePlane(visibility: PlaneVisibility) {
-    const cleanBody = body.trim() || (strokes.length ? 'A sketch left here.' : (photoBase64 ? 'A photo left here.' : ''));
+  async function savePlane(
+    visibility: PlaneVisibility,
+    options: {
+      kind?: PlaneKind;
+      recipientName?: string;
+      arrivesAt?: string;
+    } = {},
+  ) {
+    const cleanBody = body.trim() || (strokes.length ? 'a sketch left here.' : (photoBase64 ? 'a photo left here.' : ''));
     if (!cleanBody) {
-      Alert.alert('Write, draw, or add a photo first.');
+      Alert.alert('write, draw, or add a photo first.');
       setReleasing(false);
       return;
     }
@@ -602,13 +765,27 @@ function ComposerPanel({
         photoBase64: photoBase64 || undefined,
         photoMimeType: photoMimeType || undefined,
         authorName: authorName.trim() || undefined,
+        kind: options.kind,
+        recipientName: options.recipientName,
+        arrivesAt: options.arrivesAt,
         visibility,
       });
     } catch (error) {
-      Alert.alert('Could not save.', error instanceof Error ? error.message : undefined);
+      Alert.alert('could not save.', error instanceof Error ? error.message : undefined);
     } finally {
       setSaving(false);
     }
+  }
+
+  function sendToFriend() {
+    const friend = DEMO_FRIENDS.find((item) => item.id === selectedFriendId) ?? DEMO_FRIENDS[0];
+    const delay = DEMO_DELAYS.find((item) => item.id === selectedDelayId) ?? DEMO_DELAYS[0];
+    const arrivesAt = new Date(Date.now() + delay.minutes * 60_000).toISOString();
+    savePlane('free', {
+      kind: 'directed',
+      recipientName: friend.name,
+      arrivesAt,
+    });
   }
 
   return (
@@ -714,7 +891,9 @@ function ComposerPanel({
           <View style={s.releasePanel}>
             <Text style={s.releaseQuestion}>what would you like{'\n'}to do with this?</Text>
 
-            <Pressable disabled={saving} onPress={() => savePlane('folded')} style={s.releaseBtnRow}>
+            {!sendMode ? (
+              <>
+            <Pressable disabled={saving} onPress={() => savePlane('folded', { kind: 'private' })} style={s.releaseBtnRow}>
               <Image source={scrunchedImg} style={s.releaseBtnImg} resizeMode="contain" />
               <View style={s.releaseBtnText}>
                 <Text style={s.releaseBtnTitle}>keep it folded</Text>
@@ -722,7 +901,7 @@ function ComposerPanel({
               </View>
             </Pressable>
 
-            <Pressable disabled={saving} onPress={() => savePlane('free')} style={s.releaseBtnRow}>
+            <Pressable disabled={saving} onPress={() => savePlane('free', { kind: 'public' })} style={s.releaseBtnRow}>
               <Image source={paperOpenImg} style={s.releaseBtnImg} resizeMode="contain" />
               <View style={s.releaseBtnText}>
                 <Text style={s.releaseBtnTitle}>set it free</Text>
@@ -730,8 +909,58 @@ function ComposerPanel({
               </View>
             </Pressable>
 
-            <Pressable onPress={() => setReleasing(false)} disabled={saving}>
-              <Text style={s.backToEdit}>keep writing</Text>
+            <Pressable disabled={saving} onPress={() => setSendMode(true)} style={s.releaseBtnRow}>
+              <Image source={paperplanePin} style={s.releaseBtnImg} resizeMode="contain" />
+              <View style={s.releaseBtnText}>
+                <Text style={s.releaseBtnTitle}>send to someone</Text>
+                <Text style={s.releaseBtnSub}>lands for a friend later</Text>
+              </View>
+            </Pressable>
+              </>
+            ) : (
+              <View style={s.sendPanel}>
+                <Text style={s.sendLabel}>who should catch it?</Text>
+                <View style={s.chipRow}>
+                  {DEMO_FRIENDS.map((friend) => (
+                    <Pressable
+                      key={friend.id}
+                      onPress={() => setSelectedFriendId(friend.id)}
+                      style={[s.choiceChip, selectedFriendId === friend.id && s.choiceChipActive]}
+                    >
+                      <Text style={[s.choiceChipText, selectedFriendId === friend.id && s.choiceChipTextActive]}>
+                        {friend.name}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Text style={s.sendLabel}>when should it arrive?</Text>
+                <View style={s.chipRow}>
+                  {DEMO_DELAYS.map((delay) => (
+                    <Pressable
+                      key={delay.id}
+                      onPress={() => setSelectedDelayId(delay.id)}
+                      style={[s.choiceChip, selectedDelayId === delay.id && s.choiceChipActive]}
+                    >
+                      <Text style={[s.choiceChipText, selectedDelayId === delay.id && s.choiceChipTextActive]}>
+                        {delay.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Pressable disabled={saving} onPress={sendToFriend} style={s.releaseBtnRow}>
+                  <Image source={paperplanePin} style={s.releaseBtnImg} resizeMode="contain" />
+                  <View style={s.releaseBtnText}>
+                    <Text style={s.releaseBtnTitle}>send plane</Text>
+                    <Text style={s.releaseBtnSub}>it will draw a flight path</Text>
+                  </View>
+                </Pressable>
+              </View>
+            )}
+
+            <Pressable onPress={() => sendMode ? setSendMode(false) : setReleasing(false)} disabled={saving}>
+              <Text style={s.backToEdit}>{sendMode ? 'back' : 'keep writing'}</Text>
             </Pressable>
           </View>
         )}
@@ -1025,6 +1254,13 @@ const s = StyleSheet.create({
     fontStyle: 'italic',
     marginBottom: 4,
   },
+  scatteredSent: {
+    fontFamily: SERIF,
+    fontSize: 11,
+    color: C.clay,
+    fontStyle: 'italic',
+    marginBottom: 5,
+  },
   scatteredPhoto: {
     width: '100%',
     height: 70,
@@ -1083,6 +1319,13 @@ const s = StyleSheet.create({
     fontSize: 16,
     lineHeight: 23,
     color: C.walnut,
+  },
+  sentMeta: {
+    fontFamily: SERIF,
+    fontSize: 12,
+    color: C.terracotta,
+    fontStyle: 'italic',
+    marginBottom: 10,
   },
   notePhoto: {
     width: '100%',
@@ -1228,6 +1471,42 @@ const s = StyleSheet.create({
     color: C.walnut,
     lineHeight: 34,
     marginBottom: 28,
+  },
+  sendPanel: {
+    gap: 14,
+  },
+  sendLabel: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.clay,
+    fontStyle: 'italic',
+    marginTop: 4,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  choiceChip: {
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.line,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: C.cream,
+  },
+  choiceChipActive: {
+    backgroundColor: C.terracotta,
+    borderColor: C.terracotta,
+  },
+  choiceChipText: {
+    fontFamily: SERIF,
+    fontSize: 13,
+    color: C.walnut,
+    fontStyle: 'italic',
+  },
+  choiceChipTextActive: {
+    color: C.milk,
   },
   releaseBtnRow: {
     flexDirection: 'row',

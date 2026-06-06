@@ -122,6 +122,28 @@ class DbTest(unittest.TestCase):
         self.assertEqual(memory["photo_base64"], "abc123")
         self.assertEqual(memory["photo_mime_type"], "image/png")
 
+    def test_directed_memory_round_trips_simulated_friend_fields(self):
+        memory = db.create_memory(
+            body="sent to a friend",
+            latitude=25.0,
+            longitude=121.0,
+            geohash="wsqqqm1",
+            visibility="free",
+            anonymous_user_id=USER_ID,
+            kind="directed",
+            recipient_name="Mina",
+            arrives_at="2026-06-06T12:00:00Z",
+            origin_latitude=25.03,
+            origin_longitude=121.56,
+            path=self.path,
+        )
+
+        self.assertEqual(memory["kind"], "directed")
+        self.assertEqual(memory["recipient_name"], "Mina")
+        self.assertEqual(memory["arrives_at"], "2026-06-06T12:00:00Z")
+        self.assertEqual(memory["origin_latitude"], 25.03)
+        self.assertEqual(memory["origin_longitude"], 121.56)
+
 
 if __name__ == "__main__":
     unittest.main()

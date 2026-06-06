@@ -1,5 +1,5 @@
 import { API_URL } from '../config/env';
-import type { PlaneMemory, PlaneVisibility } from '../types/memory';
+import type { PlaneKind, PlaneMemory, PlaneVisibility } from '../types/memory';
 import { getAnonymousUserId } from './anonymousId';
 
 interface CreateMemoryInput {
@@ -9,6 +9,11 @@ interface CreateMemoryInput {
   photoBase64?: string;
   photoMimeType?: string;
   authorName?: string;
+  kind?: PlaneKind;
+  recipientName?: string;
+  arrivesAt?: string;
+  originLatitude?: number;
+  originLongitude?: number;
   visibility: PlaneVisibility;
   latitude: number;
   longitude: number;
@@ -47,6 +52,11 @@ export async function createMemory(input: CreateMemoryInput): Promise<PlaneMemor
       photo_base64: input.photoBase64,
       photo_mime_type: input.photoMimeType,
       author_name: input.authorName,
+      kind: input.kind,
+      recipient_name: input.recipientName,
+      arrives_at: input.arrivesAt,
+      origin_latitude: input.originLatitude,
+      origin_longitude: input.originLongitude,
       visibility: input.visibility,
       latitude: input.latitude,
       longitude: input.longitude,

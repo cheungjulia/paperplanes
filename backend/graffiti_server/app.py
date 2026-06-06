@@ -105,6 +105,11 @@ class GraffitiHandler(BaseHTTPRequestHandler):
                     photo_base64=body.get("photo_base64"),
                     photo_mime_type=body.get("photo_mime_type"),
                     author_name=body.get("author_name"),
+                    kind=body.get("kind"),
+                    recipient_name=body.get("recipient_name"),
+                    arrives_at=body.get("arrives_at"),
+                    origin_latitude=body.get("origin_latitude"),
+                    origin_longitude=body.get("origin_longitude"),
                     anonymous_user_id=user_id,
                 )
                 self.send_json({"memory": memory}, status=HTTPStatus.CREATED)
